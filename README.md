@@ -21,6 +21,44 @@ ansible-galaxy collection install bhinz.rds_bitwarden
 
 ## Usage in Playbooks
 
+### Read-only credential availability (no credential values)
+
+Use `metadata.yml` to check explicitly selected item UUIDs. It returns only
+`id`, `available`, `has_username` and `has_password` in `bitwarden_auth_metadata`.
+Names, usernames, passwords, notes, URIs, custom fields and raw CLI output are
+never included in this result. Item UUIDs are still internal identifiers; only
+publish the report to appropriate operators.
+
+```yaml
+- name: Check selected credentials
+  ansible.builtin.include_role:
+    name: bhinz.rds_bitwarden.bitwarden_auth
+    tasks_from: metadata.yml
+  vars:
+    bitwarden_auth_item_ids: "{{ selected_item_ids }}"
+
+- name: Show availability flags only
+  ansible.builtin.debug:
+    var: bitwarden_auth_metadata
+```
+
+The caller supplies 1–100 UUIDs; there is no whole-vault search. Duplicate IDs
+are normalized and queried once. A missing item returns `available: false`;
+unexpected errors fail the operation and clear any partial report. Check mode
+validates the input without login or CLI lookups and returns an empty report.
+
+If `bitwarden_auth_session` is already set, its session and
+`bitwarden_auth_appdata_dir` are reused and left open. Otherwise the role creates
+an isolated temporary directory, uses the existing login tasks and runs the
+existing logout tasks in `always`, including on lookup failures. Cleanup is
+verified. No item is created, modified or rotated, and no customer host is
+contacted. Run the role on the controller (`hosts: localhost`, `connection:
+local`). This feature uses YAML tasks and the existing `bw` CLI only; it adds no
+Python helper or custom module.
+
+Maintainer note: publish a new collection release before consumers start using
+this entrypoint. This change intentionally does not bump or publish a version.
+
 The fully qualified role name (FQCN) is `bhinz.rds_bitwarden.bitwarden_auth`.
 The `tasks/rotate_password.yml` file can be used directly:
 

@@ -1,0 +1,45 @@
+---
+# Internal task file; call metadata.yml instead.
+- name: Fetch one item using the existing CLI wrapper session
+  ansible.builtin.command:
+    argv: [bw, get, item, "{{ _bitwarden_metadata_item_id }}"]
+  environment:
+    BW_SESSION: "{{ bitwarden_auth_session }}"
+    BITWARDENCLI_APPDATA_DIR: "{{ bitwarden_auth_appdata_dir }}"
+  register: _bitwarden_metadata_raw
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Distinguish missing items from authentication and transport failures
+  ansible.builtin.assert:
+    that: >-
+      _bitwarden_metadata_raw.rc == 0 or
+      (_bitwarden_metadata_raw.stderr | trim | lower) in ['not found.', 'not found'] or
+      (_bitwarden_metadata_raw.stdout | trim | lower) in ['not found.', 'not found']
+    quiet: true
+  no_log: true
+
+- name: Parse the private result
+  ansible.builtin.set_fact:
+    _bitwarden_metadata_entry: "{{ (_bitwarden_metadata_raw.stdout | from_json) if _bitwarden_metadata_raw.rc == 0 else {} }}"
+  no_log: true
+
+- name: Verify the returned item identity
+  ansible.builtin.assert:
+    that:
+      - _bitwarden_metadata_entry is mapping
+      - _bitwarden_metadata_raw.rc != 0 or _bitwarden_metadata_entry.get('id', '') | lower == _bitwarden_metadata_item_id
+    quiet: true
+  no_log: true
+
+- name: Return only an explicit allowlist of non-secret fields
+  ansible.builtin.set_fact:
+    bitwarden_auth_metadata: >-
+      {{ bitwarden_auth_metadata + [{
+        'id': _bitwarden_metadata_item_id,
+        'available': _bitwarden_metadata_raw.rc == 0,
+        'has_username': ((_bitwarden_metadata_entry.get('login') or {}).get('username') or '') | length > 0,
+        'has_password': ((_bitwarden_metadata_entry.get('login') or {}).get('password') or '') | length > 0
+      }] }}
+  no_log: true

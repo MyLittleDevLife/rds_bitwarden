@@ -1,0 +1,101 @@
+---
+# Read-only counterpart to rotate_password.yml. Returns booleans, never secrets.
+- name: Clear previous metadata before validating this request
+  ansible.builtin.set_fact:
+    bitwarden_auth_metadata: []
+
+- name: Require an explicit bounded list of item UUIDs
+  ansible.builtin.assert:
+    that:
+      - bitwarden_auth_item_ids is defined
+      - bitwarden_auth_item_ids is sequence and bitwarden_auth_item_ids is not string
+      - bitwarden_auth_item_ids | length > 0
+      - bitwarden_auth_item_ids | length <= 100
+    fail_msg: Provide bitwarden_auth_item_ids as a list of 1 to 100 item UUIDs.
+    quiet: true
+
+- name: Validate item identifiers
+  ansible.builtin.assert:
+    that: item is string and item is match('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+    fail_msg: Each item identifier must be a UUID.
+    quiet: true
+  loop: "{{ bitwarden_auth_item_ids }}"
+  no_log: true
+
+- name: Read metadata when not in check mode
+  when: not ansible_check_mode
+  block:
+    - name: Determine whether this invocation owns the session
+      ansible.builtin.set_fact:
+        _bitwarden_metadata_owns_session: "{{ bitwarden_auth_session | default('', true) | length == 0 }}"
+      no_log: true
+
+    - name: Allocate isolated state for an automatically created session
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: bw-metadata-
+      register: _bitwarden_metadata_directory
+      when: _bitwarden_metadata_owns_session
+
+    - name: Resolve the session directory without changing the caller's setting
+      ansible.builtin.set_fact:
+        _bitwarden_metadata_appdata: >-
+          {{ _bitwarden_metadata_directory.path if _bitwarden_metadata_owns_session
+             else (bitwarden_auth_appdata_dir | default('/tmp/bw_ansible_' ~ inventory_hostname)) }}
+      no_log: true
+
+    - name: Use the collection lifecycle for read-only item metadata
+      vars:
+        bitwarden_auth_appdata_dir: "{{ _bitwarden_metadata_appdata }}"
+      no_log: true
+      block:
+        - name: Authenticate only when no caller-owned session exists
+          ansible.builtin.include_tasks: main.yml
+          when: _bitwarden_metadata_owns_session
+
+        - name: Read each explicitly requested item
+          ansible.builtin.include_tasks: metadata_item.yml
+          loop: "{{ bitwarden_auth_item_ids | map('lower') | unique | list }}"
+          loop_control:
+            loop_var: _bitwarden_metadata_item_id
+      rescue:
+        - name: Discard a partial report on any unexpected lookup failure
+          ansible.builtin.set_fact:
+            bitwarden_auth_metadata: []
+        - name: Fail without returning credential-bearing CLI diagnostics
+          ansible.builtin.fail:
+            msg: Bitwarden metadata lookup failed. Check authentication, connectivity and item permissions.
+          no_log: false
+      always:
+        - name: End only the session created by this invocation
+          ansible.builtin.include_tasks: logout.yml
+          when: _bitwarden_metadata_owns_session
+
+        - name: Check that the owned temporary cache was removed
+          ansible.builtin.stat:
+            path: "{{ _bitwarden_metadata_appdata }}"
+          register: _bitwarden_metadata_cleanup
+          when: _bitwarden_metadata_owns_session
+
+        - name: Require removal of owned temporary state
+          ansible.builtin.assert:
+            that: not _bitwarden_metadata_cleanup.stat.exists
+            fail_msg: The temporary Bitwarden cache could not be removed.
+            quiet: true
+          when: _bitwarden_metadata_owns_session
+
+        - name: Clear private item results
+          ansible.builtin.set_fact:
+            _bitwarden_metadata_raw: {}
+            _bitwarden_metadata_entry: {}
+
+        - name: Clear login results owned by this invocation
+          ansible.builtin.set_fact:
+            bitwarden_auth_unlock: {}
+            bitwarden_auth_login: {}
+          when: _bitwarden_metadata_owns_session
+
+- name: Explain the check-mode boundary
+  ansible.builtin.debug:
+    msg: Item UUIDs validated; no login, lookup or customer connection was performed in check mode.
+  when: ansible_check_mode
