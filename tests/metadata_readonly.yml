@@ -1,0 +1,108 @@
+---
+# Run with an installed development copy of this collection.
+- name: Validate the upstream metadata candidate on the controller only
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate check mode without credentials
+      when: ansible_check_mode
+      ansible.builtin.include_role:
+        name: bhinz.rds_bitwarden.bitwarden_auth
+        tasks_from: metadata.yml
+        apply:
+          check_mode: true
+      vars:
+        bitwarden_auth_item_ids: ['00000000-0000-0000-0000-000000000000']
+    - name: Require empty results in check mode
+      when: ansible_check_mode
+      ansible.builtin.assert:
+        that: bitwarden_auth_metadata == []
+        quiet: true
+    - name: Verify invalid input is rejected before login
+      block:
+        - name: Pass invalid identifiers
+          ansible.builtin.include_role:
+            name: bhinz.rds_bitwarden.bitwarden_auth
+            tasks_from: metadata.yml
+          vars:
+            bitwarden_auth_item_ids: ['not-a-uuid']
+      rescue:
+        - name: Record expected validation rejection
+          ansible.builtin.set_fact:
+            metadata_validation_rejected: true
+    - name: Require fail-closed validation and no partial output
+      ansible.builtin.assert:
+        that:
+          - metadata_validation_rejected | default(false)
+          - bitwarden_auth_metadata == []
+        quiet: true
+    - name: Exercise real read-only lookups only with explicit test IDs
+      when: metadata_test_item_ids | default([]) | length > 0 and not ansible_check_mode
+      block:
+        - name: Read selected entries with an automatically owned session
+          ansible.builtin.include_role:
+            name: bhinz.rds_bitwarden.bitwarden_auth
+            tasks_from: metadata.yml
+          vars:
+            bitwarden_auth_item_ids: "{{ metadata_test_item_ids }}"
+        - name: Check the complete allowlist and automatic logout
+          ansible.builtin.assert:
+            that:
+              - bitwarden_auth_metadata | length == metadata_test_item_ids | map('lower') | unique | length
+              - bitwarden_auth_session == ''
+              - item.keys() | list | sort == ['available', 'has_password', 'has_username', 'id']
+            quiet: true
+          loop: "{{ bitwarden_auth_metadata }}"
+        - name: Show safe results only
+          ansible.builtin.debug:
+            var: bitwarden_auth_metadata
+        - name: Allocate a separate caller-owned session for the reuse test
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: bw-metadata-reuse-test-
+          register: metadata_caller_directory
+        - name: Verify preservation of caller-owned sessions
+          vars:
+            bitwarden_auth_appdata_dir: "{{ metadata_caller_directory.path }}"
+          block:
+            - name: Open caller session using the published collection
+              ansible.builtin.include_role:
+                name: bhinz.rds_bitwarden.bitwarden_auth
+                apply:
+                  no_log: true
+              no_log: true
+            - name: Retain session identity for comparison
+              ansible.builtin.set_fact:
+                metadata_caller_session: "{{ bitwarden_auth_session }}"
+              no_log: true
+            - name: Read metadata using the existing session
+              ansible.builtin.include_role:
+                name: bhinz.rds_bitwarden.bitwarden_auth
+                tasks_from: metadata.yml
+              vars:
+                bitwarden_auth_item_ids: "{{ metadata_test_item_ids }}"
+            - name: Verify caller session is still owned by the caller
+              ansible.builtin.assert:
+                that: bitwarden_auth_session == metadata_caller_session and bitwarden_auth_session | length > 0
+                quiet: true
+              no_log: true
+          always:
+            - name: Close the caller session through the collection
+              ansible.builtin.include_role:
+                name: bhinz.rds_bitwarden.bitwarden_auth
+                tasks_from: logout.yml
+                apply:
+                  no_log: true
+              no_log: true
+            - name: Verify caller cache removal
+              ansible.builtin.stat:
+                path: "{{ metadata_caller_directory.path }}"
+              register: metadata_caller_cleanup
+            - name: Require caller cleanup
+              ansible.builtin.assert:
+                that: not metadata_caller_cleanup.stat.exists
+                quiet: true
+    - name: Report test boundaries
+      ansible.builtin.debug:
+        msg: Controller-only test completed. No customer connection, update, reboot, password rotation or vault write.
